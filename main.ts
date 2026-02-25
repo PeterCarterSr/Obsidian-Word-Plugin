@@ -1,0 +1,1336 @@
+import {
+	App,
+	Editor,
+	MarkdownView,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	ItemView,
+	WorkspaceLeaf,
+	setIcon,
+	debounce,
+	Notice,
+	TFile
+} from 'obsidian';
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const VIEW_TYPE_TOC = 'arcadia-toc-view';
+
+const FONT_COLORS = [
+	'#000000', '#434343', '#666666', '#999999', '#b7b7b7', '#cccccc', '#d9d9d9', '#efefef', '#f3f3f3', '#ffffff',
+	'#980000', '#ff0000', '#ff9900', '#ffff00', '#00ff00', '#00ffff', '#4a86e8', '#0000ff', '#9900ff', '#ff00ff',
+	'#e6b8af', '#f4cccc', '#fce5cd', '#fff2cc', '#d9ead3', '#d0e0e3', '#c9daf8', '#cfe2f3', '#d9d2e9', '#ead1dc',
+	'#dd7e6b', '#ea9999', '#f9cb9c', '#ffe599', '#b6d7a8', '#a2c4c9', '#a4c2f4', '#9fc5e8', '#b4a7d6', '#d5a6bd',
+	'#cc4125', '#e06666', '#f6b26b', '#ffd966', '#93c47d', '#76a5af', '#6d9eeb', '#6fa8dc', '#8e7cc3', '#c27ba0',
+	'#a61c00', '#cc0000', '#e69138', '#f1c232', '#6aa84f', '#45818e', '#3c78d8', '#3d85c6', '#674ea7', '#a64d79',
+	'#85200c', '#990000', '#b45f06', '#bf9000', '#38761d', '#134f5c', '#1155cc', '#0b5394', '#351c75', '#741b47',
+	'#5b0f00', '#660000', '#783f04', '#7f6000', '#274e13', '#0c343d', '#1c4587', '#073763', '#20124d', '#4c1130'
+];
+
+const BACKGROUND_COLORS = [
+	'transparent', '#ffffff', '#f5f5f5', '#e0e0e0', '#bdbdbd', '#9e9e9e',
+	'#ffff00', '#00ff00', '#00ffff', '#ff00ff', '#ff0000', '#0000ff',
+	'#fff59d', '#c5e1a5', '#80deea', '#ce93d8', '#ef9a9a', '#90caf9',
+	'#ffccbc', '#ffe0b2', '#fff9c4', '#dcedc8', '#b2dfdb', '#b3e5fc',
+	'#e1bee7', '#f8bbd0', '#ffcdd2', '#d7ccc8', '#cfd8dc', '#b0bec5'
+];
+
+const BIBLE_TRANSLATIONS: Record<string, string> = {
+	'ESV': 'English Standard Version',
+	'NIV': 'New International Version',
+	'KJV': 'King James Version',
+	'NASB': 'New American Standard Bible',
+	'NLT': 'New Living Translation',
+	'CSB': 'Christian Standard Bible',
+	'NKJV': 'New King James Version',
+	'RSV': 'Revised Standard Version'
+};
+
+// ============================================================================
+// INTERFACES
+// ============================================================================
+
+interface ArcadiaToolbarSettings {
+	activeTab: string;
+	// TOC
+	tocPinned: boolean;
+	tocShowOnStartup: boolean;
+	// Colors
+	lastFontColor: string;
+	lastBackgroundColor: string;
+	// Scripture
+	scriptureTranslation: string;
+	// Tab visibility
+	showHomeTab: boolean;
+	showInsertTab: boolean;
+	showTheologyTab: boolean;
+	showViewTab: boolean;
+}
+
+const DEFAULT_SETTINGS: ArcadiaToolbarSettings = {
+	activeTab: 'home',
+	tocPinned: false,
+	tocShowOnStartup: false,
+	lastFontColor: '#ff0000',
+	lastBackgroundColor: '#ffff00',
+	scriptureTranslation: 'ESV',
+	showHomeTab: true,
+	showInsertTab: true,
+	showTheologyTab: true,
+	showViewTab: true,
+};
+
+// ============================================================================
+// TOC VIEW
+// ============================================================================
+
+class ArcadiaTOCView extends ItemView {
+	plugin: ArcadiaToolbarPlugin;
+	private debouncedRender: () => void;
+
+	constructor(leaf: WorkspaceLeaf, plugin: ArcadiaToolbarPlugin) {
+		super(leaf);
+		this.plugin = plugin;
+		this.debouncedRender = debounce(() => this.renderTOC(), 300, true);
+	}
+
+	getViewType(): string { return VIEW_TYPE_TOC; }
+	getDisplayText(): string { return 'Table of Contents'; }
+	getIcon(): string { return 'list-tree'; }
+
+	async onOpen() {
+		this.containerEl.addClass('arcadia-toc-container');
+		this.renderTOC();
+
+		this.registerEvent(
+			this.app.workspace.on('active-leaf-change', () => this.debouncedRender())
+		);
+		this.registerEvent(
+			this.app.metadataCache.on('changed', () => this.debouncedRender())
+		);
+		this.registerEvent(
+			this.app.workspace.on('editor-change', () => this.debouncedRender())
+		);
+	}
+
+	renderTOC() {
+		const content = this.containerEl.children[1];
+		if (!content) return;
+		content.empty();
+
+		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!activeView || !activeView.file) {
+			const empty = content.createEl('div', { cls: 'arcadia-toc-empty' });
+			empty.createEl('div', { cls: 'arcadia-toc-empty-icon' });
+			setIcon(empty.children[0] as HTMLElement, 'file-text');
+			empty.createEl('div', { text: 'Open a document to see its outline', cls: 'arcadia-toc-empty-text' });
+			return;
+		}
+
+		// Header
+		const header = content.createEl('div', { cls: 'arcadia-toc-header' });
+		const titleRow = header.createEl('div', { cls: 'arcadia-toc-title-row' });
+		const iconEl = titleRow.createEl('span', { cls: 'arcadia-toc-header-icon' });
+		setIcon(iconEl, 'list-tree');
+		titleRow.createEl('span', { text: 'Contents', cls: 'arcadia-toc-title' });
+
+		// File name
+		header.createEl('div', {
+			text: activeView.file.basename,
+			cls: 'arcadia-toc-filename'
+		});
+
+		// Get headings
+		const cache = this.app.metadataCache.getFileCache(activeView.file);
+		if (!cache?.headings || cache.headings.length === 0) {
+			const empty = content.createEl('div', { cls: 'arcadia-toc-empty' });
+			empty.createEl('div', { text: 'No headings in this document', cls: 'arcadia-toc-empty-text' });
+			return;
+		}
+
+		const editor = activeView.editor;
+		const cursorLine = editor.getCursor().line;
+
+		const list = content.createEl('div', { cls: 'arcadia-toc-list' });
+
+		for (let i = 0; i < cache.headings.length; i++) {
+			const heading = cache.headings[i];
+			const nextLine = i + 1 < cache.headings.length
+				? cache.headings[i + 1].position.start.line
+				: Infinity;
+
+			const isActive = cursorLine >= heading.position.start.line && cursorLine < nextLine;
+
+			const item = list.createEl('div', {
+				cls: `arcadia-toc-item arcadia-toc-level-${heading.level}${isActive ? ' arcadia-toc-active' : ''}`,
+			});
+
+			const bullet = item.createEl('span', { cls: 'arcadia-toc-bullet' });
+			bullet.textContent = heading.level <= 2 ? '\u25CF' : '\u25CB';
+
+			item.createEl('span', { text: heading.heading, cls: 'arcadia-toc-text' });
+
+			item.addEventListener('click', () => {
+				const line = heading.position.start.line;
+				editor.setCursor(line, 0);
+				editor.scrollIntoView(
+					{ from: { line, ch: 0 }, to: { line, ch: 0 } },
+					true
+				);
+				this.renderTOC();
+			});
+		}
+	}
+
+	async onClose() {}
+}
+
+// ============================================================================
+// MAIN PLUGIN
+// ============================================================================
+
+export default class ArcadiaToolbarPlugin extends Plugin {
+	settings: ArcadiaToolbarSettings;
+	toolbarEl: HTMLElement | null = null;
+	activeDropdown: HTMLElement | null = null;
+
+	async onload() {
+		await this.loadSettings();
+
+		// Register TOC view
+		this.registerView(VIEW_TYPE_TOC, (leaf) => new ArcadiaTOCView(leaf, this));
+
+		// Close dropdowns on outside click
+		this.registerDomEvent(document, 'click', (e: MouseEvent) => {
+			if (this.activeDropdown) {
+				const target = e.target as HTMLElement;
+				if (!target.closest('.arcadia-dropdown-wrapper')) {
+					this.closeDropdowns();
+				}
+			}
+		});
+
+		// Update toolbar on view changes
+		this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.updateToolbar()));
+		this.registerEvent(this.app.workspace.on('layout-change', () => this.updateToolbar()));
+
+		// Register all commands
+		this.registerCommands();
+
+		// Ribbon icon for TOC
+		this.addRibbonIcon('list-tree', 'Toggle Table of Contents', () => this.toggleTOC());
+
+		// Settings tab
+		this.addSettingTab(new ArcadiaToolbarSettingTab(this.app, this));
+
+		// Initial render
+		this.app.workspace.onLayoutReady(() => {
+			this.updateToolbar();
+			if (this.settings.tocPinned && this.settings.tocShowOnStartup) {
+				this.activateTOC();
+			}
+		});
+	}
+
+	onunload() {
+		this.removeToolbar();
+		this.app.workspace.detachLeavesOfType(VIEW_TYPE_TOC);
+	}
+
+	async loadSettings() {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	}
+
+	async saveSettings() {
+		await this.saveData(this.settings);
+	}
+
+	// ========================================================================
+	// TOC MANAGEMENT
+	// ========================================================================
+
+	async activateTOC() {
+		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_TOC);
+		if (existing.length > 0) return;
+
+		const leaf = this.app.workspace.getLeftLeaf(false);
+		if (leaf) {
+			await leaf.setViewState({ type: VIEW_TYPE_TOC, active: true });
+			this.app.workspace.revealLeaf(leaf);
+		}
+	}
+
+	async toggleTOC() {
+		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_TOC);
+		if (existing.length > 0) {
+			existing.forEach(leaf => leaf.detach());
+		} else {
+			await this.activateTOC();
+		}
+	}
+
+	// ========================================================================
+	// TOOLBAR RENDERING
+	// ========================================================================
+
+	removeToolbar() {
+		if (this.toolbarEl) {
+			this.toolbarEl.remove();
+			this.toolbarEl = null;
+		}
+	}
+
+	closeDropdowns() {
+		if (this.activeDropdown) {
+			this.activeDropdown.remove();
+			this.activeDropdown = null;
+		}
+	}
+
+	getActiveEditor(): { editor: Editor; view: MarkdownView } | null {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view) return null;
+		return { editor: view.editor, view };
+	}
+
+	updateToolbar() {
+		this.removeToolbar();
+		const ctx = this.getActiveEditor();
+		if (!ctx) return;
+
+		const editorEl = ctx.view.containerEl.querySelector('.cm-editor');
+		if (!editorEl) return;
+
+		// Create ribbon container
+		this.toolbarEl = document.createElement('div');
+		this.toolbarEl.className = 'arcadia-ribbon';
+
+		// Tab bar
+		const tabBar = document.createElement('div');
+		tabBar.className = 'arcadia-ribbon-tabbar';
+
+		const tabs = [
+			{ id: 'home', label: 'Home', icon: 'home', setting: 'showHomeTab' as keyof ArcadiaToolbarSettings },
+			{ id: 'insert', label: 'Insert', icon: 'plus-circle', setting: 'showInsertTab' as keyof ArcadiaToolbarSettings },
+			{ id: 'theology', label: 'Theology', icon: 'book-open', setting: 'showTheologyTab' as keyof ArcadiaToolbarSettings },
+			{ id: 'view', label: 'View', icon: 'eye', setting: 'showViewTab' as keyof ArcadiaToolbarSettings },
+		];
+
+		for (const tab of tabs) {
+			if (!this.settings[tab.setting]) continue;
+
+			const tabBtn = document.createElement('button');
+			tabBtn.className = `arcadia-ribbon-tab${this.settings.activeTab === tab.id ? ' arcadia-ribbon-tab-active' : ''}`;
+			tabBtn.dataset.tab = tab.id;
+
+			const iconSpan = document.createElement('span');
+			iconSpan.className = 'arcadia-ribbon-tab-icon';
+			setIcon(iconSpan, tab.icon);
+			tabBtn.appendChild(iconSpan);
+
+			tabBtn.appendChild(document.createTextNode(tab.label));
+
+			tabBtn.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.settings.activeTab = tab.id;
+				this.saveSettings();
+				this.updateToolbar();
+			});
+
+			tabBar.appendChild(tabBtn);
+		}
+
+		this.toolbarEl.appendChild(tabBar);
+
+		// Tab content
+		const content = document.createElement('div');
+		content.className = 'arcadia-ribbon-content';
+
+		switch (this.settings.activeTab) {
+			case 'home': this.buildHomeTab(content, ctx); break;
+			case 'insert': this.buildInsertTab(content, ctx); break;
+			case 'theology': this.buildTheologyTab(content, ctx); break;
+			case 'view': this.buildViewTab(content, ctx); break;
+		}
+
+		this.toolbarEl.appendChild(content);
+
+		// Insert into editor
+		const cmScroller = editorEl.querySelector('.cm-scroller');
+		if (cmScroller) {
+			editorEl.insertBefore(this.toolbarEl, cmScroller);
+		}
+	}
+
+	// ========================================================================
+	// TAB BUILDERS
+	// ========================================================================
+
+	buildHomeTab(container: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		const e = ctx.editor;
+
+		// Clipboard group
+		this.addGroup(container, 'Clipboard', [
+			this.btn('undo-2', 'Undo', () => (e as any).undo()),
+			this.btn('redo-2', 'Redo', () => (e as any).redo()),
+		]);
+
+		// Font group
+		this.addGroup(container, 'Font', [
+			this.btn('bold', 'Bold', () => this.toggleWrap(e, '**')),
+			this.btn('italic', 'Italic', () => this.toggleWrap(e, '*')),
+			this.btn('underline', 'Underline', () => this.toggleHtmlWrap(e, 'u')),
+			this.btn('strikethrough', 'Strikethrough', () => this.toggleWrap(e, '~~')),
+			this.btn('highlighter', 'Highlight', () => this.toggleWrap(e, '==')),
+			this.btn('subscript', 'Subscript', () => this.toggleHtmlWrap(e, 'sub')),
+			this.btn('superscript', 'Superscript', () => this.toggleHtmlWrap(e, 'sup')),
+			this.btn('eraser', 'Clear Formatting', () => this.clearFormatting(e)),
+		]);
+
+		// Colors group
+		const colorsGroup = this.addGroup(container, 'Colors', []);
+		this.addColorButton(colorsGroup, 'font-color', 'baseline', 'Font Color', this.settings.lastFontColor, ctx);
+		this.addColorButton(colorsGroup, 'bg-color', 'highlighter', 'Background', this.settings.lastBackgroundColor, ctx);
+
+		// Heading group
+		const headingGroup = this.addGroup(container, 'Heading', []);
+		this.addHeadingDropdown(headingGroup, ctx);
+
+		// Paragraph group
+		this.addGroup(container, 'Paragraph', [
+			this.btn('list', 'Bullet List', () => this.toggleBulletList(e)),
+			this.btn('list-ordered', 'Numbered List', () => this.toggleNumberedList(e)),
+			this.btn('list-checks', 'Checklist', () => this.toggleChecklist(e)),
+			this.btn('quote', 'Blockquote', () => this.toggleBlockquote(e)),
+		]);
+
+		// Indent group
+		this.addGroup(container, 'Indent', [
+			this.btn('indent-decrease', 'Outdent', () => this.outdent(e)),
+			this.btn('indent-increase', 'Indent', () => this.indent(e)),
+		]);
+
+		// Alignment group
+		const alignGroup = this.addGroup(container, 'Align', []);
+		this.addAlignmentDropdown(alignGroup, ctx);
+	}
+
+	buildInsertTab(container: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		const e = ctx.editor;
+
+		// Links group
+		this.addGroup(container, 'Links', [
+			this.btn('link', 'Link', () => this.insertLink(e)),
+			this.btn('file-symlink', 'Internal Link', () => this.insertInternalLink(e)),
+		]);
+
+		// Media group
+		this.addGroup(container, 'Media', [
+			this.btn('image', 'Image', () => this.insertImage(e)),
+		]);
+
+		// Table group
+		this.addGroup(container, 'Table', [
+			this.btn('table-2', 'Table', () => this.insertTable(e)),
+		]);
+
+		// Code group
+		this.addGroup(container, 'Code', [
+			this.btn('code', 'Inline Code', () => this.toggleWrap(e, '`')),
+			this.btn('file-code-2', 'Code Block', () => this.insertCodeBlock(e)),
+		]);
+
+		// Elements group
+		this.addGroup(container, 'Elements', [
+			this.btn('minus', 'Horizontal Rule', () => this.insertHorizontalRule(e)),
+			this.btn('message-square', 'Callout', () => this.insertCallout(e)),
+			this.btn('footprints', 'Footnote', () => this.insertFootnote(e)),
+		]);
+
+		// Date group
+		this.addGroup(container, 'Date', [
+			this.btn('calendar', 'Insert Date', () => this.insertDate(e)),
+			this.btn('clock', 'Insert Date & Time', () => this.insertDateTime(e)),
+		]);
+	}
+
+	buildTheologyTab(container: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		const e = ctx.editor;
+
+		// Scripture group
+		const scriptureGroup = this.addGroup(container, 'Scripture', []);
+		this.addScriptureButton(scriptureGroup, ctx);
+
+		// Reference group
+		this.addGroup(container, 'Reference', [
+			this.btn('bookmark', 'Cross Reference', () => this.insertCrossReference(e)),
+			this.btn('highlighter', 'Verse Highlight', () => this.insertVerseHighlight(e)),
+		]);
+
+		// Notes group
+		this.addGroup(container, 'Notes', [
+			this.btn('message-circle', 'Commentary Note', () => this.insertCommentaryNote(e)),
+			this.btn('languages', 'Greek/Hebrew Note', () => this.insertLanguageNote(e)),
+		]);
+	}
+
+	buildViewTab(container: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		// TOC group
+		const tocGroup = this.addGroup(container, 'Contents', []);
+		const tocBtn = this.btn('list-tree', 'Toggle TOC', () => this.toggleTOC());
+		tocGroup.querySelector('.arcadia-group-buttons')!.appendChild(tocBtn);
+
+		const pinBtn = this.btn(
+			this.settings.tocPinned ? 'pin-off' : 'pin',
+			this.settings.tocPinned ? 'Unpin TOC' : 'Pin TOC',
+			() => {
+				this.settings.tocPinned = !this.settings.tocPinned;
+				this.settings.tocShowOnStartup = this.settings.tocPinned;
+				this.saveSettings();
+				this.updateToolbar();
+				new Notice(this.settings.tocPinned ? 'TOC pinned — will open on startup' : 'TOC unpinned');
+			}
+		);
+		if (this.settings.tocPinned) pinBtn.classList.add('arcadia-btn-active');
+		tocGroup.querySelector('.arcadia-group-buttons')!.appendChild(pinBtn);
+
+		// Display group
+		this.addGroup(container, 'Display', [
+			this.btn('maximize', 'Focus Mode', () => {
+				(this.app as any).commands.executeCommandById('editor:toggle-fold-all');
+			}),
+		]);
+
+		// Info group
+		const infoGroup = this.addGroup(container, 'Info', []);
+		const wordCountEl = document.createElement('div');
+		wordCountEl.className = 'arcadia-word-count';
+		const text = ctx.editor.getValue();
+		const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+		const chars = text.length;
+		wordCountEl.textContent = `${words.toLocaleString()} words \u00B7 ${chars.toLocaleString()} chars`;
+		infoGroup.querySelector('.arcadia-group-buttons')!.appendChild(wordCountEl);
+	}
+
+	// ========================================================================
+	// UI HELPERS
+	// ========================================================================
+
+	btn(icon: string, tooltip: string, action: () => void): HTMLButtonElement {
+		const btn = document.createElement('button');
+		btn.className = 'arcadia-btn';
+		btn.setAttribute('aria-label', tooltip);
+		btn.setAttribute('title', tooltip);
+		setIcon(btn, icon);
+		btn.addEventListener('click', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			action();
+		});
+		return btn;
+	}
+
+	addGroup(container: HTMLElement, label: string, buttons: HTMLButtonElement[]): HTMLElement {
+		const group = document.createElement('div');
+		group.className = 'arcadia-group';
+
+		const buttonsRow = document.createElement('div');
+		buttonsRow.className = 'arcadia-group-buttons';
+		for (const btn of buttons) {
+			buttonsRow.appendChild(btn);
+		}
+		group.appendChild(buttonsRow);
+
+		const labelEl = document.createElement('div');
+		labelEl.className = 'arcadia-group-label';
+		labelEl.textContent = label;
+		group.appendChild(labelEl);
+
+		// Separator
+		const sep = document.createElement('div');
+		sep.className = 'arcadia-group-separator';
+		container.appendChild(group);
+		container.appendChild(sep);
+
+		return group;
+	}
+
+	addColorButton(
+		group: HTMLElement,
+		type: 'font-color' | 'bg-color',
+		iconName: string,
+		tooltip: string,
+		currentColor: string,
+		ctx: { editor: Editor; view: MarkdownView }
+	) {
+		const wrapper = document.createElement('div');
+		wrapper.className = 'arcadia-dropdown-wrapper';
+
+		const btnEl = document.createElement('button');
+		btnEl.className = 'arcadia-btn arcadia-color-btn';
+		btnEl.setAttribute('title', tooltip);
+
+		const iconSpan = document.createElement('span');
+		iconSpan.className = 'arcadia-color-icon';
+		setIcon(iconSpan, iconName);
+		btnEl.appendChild(iconSpan);
+
+		const bar = document.createElement('span');
+		bar.className = 'arcadia-color-bar';
+		bar.style.backgroundColor = currentColor === 'transparent' ? '#ccc' : currentColor;
+		btnEl.appendChild(bar);
+
+		const arrow = document.createElement('span');
+		arrow.className = 'arcadia-dropdown-arrow';
+		setIcon(arrow, 'chevron-down');
+		btnEl.appendChild(arrow);
+
+		btnEl.addEventListener('click', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.openColorDropdown(wrapper, type, ctx);
+		});
+
+		wrapper.appendChild(btnEl);
+		group.querySelector('.arcadia-group-buttons')!.appendChild(wrapper);
+	}
+
+	openColorDropdown(wrapper: HTMLElement, type: 'font-color' | 'bg-color', ctx: { editor: Editor; view: MarkdownView }) {
+		this.closeDropdowns();
+
+		const dropdown = document.createElement('div');
+		dropdown.className = 'arcadia-dropdown-menu';
+
+		const title = document.createElement('div');
+		title.className = 'arcadia-dropdown-title';
+		title.textContent = type === 'font-color' ? 'Font Color' : 'Background Color';
+		dropdown.appendChild(title);
+
+		const colors = type === 'font-color' ? FONT_COLORS : BACKGROUND_COLORS;
+		const grid = document.createElement('div');
+		grid.className = 'arcadia-color-grid';
+
+		for (const color of colors) {
+			const swatch = document.createElement('button');
+			swatch.className = 'arcadia-color-swatch';
+			if (color === 'transparent') {
+				swatch.innerHTML = '\u2715';
+				swatch.style.backgroundColor = '#fff';
+				swatch.style.color = '#999';
+			} else {
+				swatch.style.backgroundColor = color;
+			}
+			swatch.setAttribute('title', color);
+			swatch.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				if (type === 'font-color') {
+					this.applyFontColor(ctx.editor, color);
+				} else {
+					this.applyBackgroundColor(ctx.editor, color);
+				}
+				this.closeDropdowns();
+				this.updateToolbar();
+			});
+			grid.appendChild(swatch);
+		}
+
+		dropdown.appendChild(grid);
+		wrapper.appendChild(dropdown);
+		this.activeDropdown = dropdown;
+	}
+
+	addHeadingDropdown(group: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		const wrapper = document.createElement('div');
+		wrapper.className = 'arcadia-dropdown-wrapper';
+
+		const btnEl = document.createElement('button');
+		btnEl.className = 'arcadia-btn arcadia-heading-btn';
+		btnEl.setAttribute('title', 'Heading');
+
+		const iconSpan = document.createElement('span');
+		setIcon(iconSpan, 'heading');
+		btnEl.appendChild(iconSpan);
+
+		const arrow = document.createElement('span');
+		arrow.className = 'arcadia-dropdown-arrow';
+		setIcon(arrow, 'chevron-down');
+		btnEl.appendChild(arrow);
+
+		btnEl.addEventListener('click', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.openHeadingDropdown(wrapper, ctx);
+		});
+
+		wrapper.appendChild(btnEl);
+		group.querySelector('.arcadia-group-buttons')!.appendChild(wrapper);
+	}
+
+	openHeadingDropdown(wrapper: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		this.closeDropdowns();
+
+		const dropdown = document.createElement('div');
+		dropdown.className = 'arcadia-dropdown-menu arcadia-heading-menu';
+
+		for (let i = 1; i <= 6; i++) {
+			const item = document.createElement('button');
+			item.className = 'arcadia-heading-item';
+			item.innerHTML = `<span class="arcadia-heading-preview arcadia-h${i}">Heading ${i}</span>`;
+			item.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.insertHeading(ctx.editor, i);
+				this.closeDropdowns();
+			});
+			dropdown.appendChild(item);
+		}
+
+		// Normal text option
+		const normalItem = document.createElement('button');
+		normalItem.className = 'arcadia-heading-item';
+		normalItem.innerHTML = '<span class="arcadia-heading-preview">Normal text</span>';
+		normalItem.addEventListener('click', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.removeHeading(ctx.editor);
+			this.closeDropdowns();
+		});
+		dropdown.appendChild(normalItem);
+
+		wrapper.appendChild(dropdown);
+		this.activeDropdown = dropdown;
+	}
+
+	addAlignmentDropdown(group: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		const wrapper = document.createElement('div');
+		wrapper.className = 'arcadia-dropdown-wrapper';
+
+		const btnEl = document.createElement('button');
+		btnEl.className = 'arcadia-btn';
+		btnEl.setAttribute('title', 'Text Alignment');
+
+		const iconSpan = document.createElement('span');
+		setIcon(iconSpan, 'align-left');
+		btnEl.appendChild(iconSpan);
+
+		const arrow = document.createElement('span');
+		arrow.className = 'arcadia-dropdown-arrow';
+		setIcon(arrow, 'chevron-down');
+		btnEl.appendChild(arrow);
+
+		btnEl.addEventListener('click', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.openAlignmentDropdown(wrapper, ctx);
+		});
+
+		wrapper.appendChild(btnEl);
+		group.querySelector('.arcadia-group-buttons')!.appendChild(wrapper);
+	}
+
+	openAlignmentDropdown(wrapper: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		this.closeDropdowns();
+
+		const dropdown = document.createElement('div');
+		dropdown.className = 'arcadia-dropdown-menu';
+
+		const grid = document.createElement('div');
+		grid.className = 'arcadia-align-grid';
+
+		const alignments = [
+			{ align: 'left', icon: 'align-left', label: 'Left' },
+			{ align: 'center', icon: 'align-center', label: 'Center' },
+			{ align: 'right', icon: 'align-right', label: 'Right' },
+			{ align: 'justify', icon: 'align-justify', label: 'Justify' },
+		];
+
+		for (const a of alignments) {
+			const btn = document.createElement('button');
+			btn.className = 'arcadia-align-button';
+			btn.setAttribute('title', a.label);
+			setIcon(btn, a.icon);
+			btn.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.setAlignment(ctx.editor, a.align);
+				this.closeDropdowns();
+			});
+			grid.appendChild(btn);
+		}
+
+		dropdown.appendChild(grid);
+		wrapper.appendChild(dropdown);
+		this.activeDropdown = dropdown;
+	}
+
+	addScriptureButton(group: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		const wrapper = document.createElement('div');
+		wrapper.className = 'arcadia-dropdown-wrapper';
+
+		const btnEl = document.createElement('button');
+		btnEl.className = 'arcadia-btn arcadia-scripture-btn';
+		btnEl.setAttribute('title', `Insert Scripture (${this.settings.scriptureTranslation})`);
+
+		const iconSpan = document.createElement('span');
+		setIcon(iconSpan, 'book-open');
+		btnEl.appendChild(iconSpan);
+
+		const label = document.createElement('span');
+		label.className = 'arcadia-scripture-label';
+		label.textContent = this.settings.scriptureTranslation;
+		btnEl.appendChild(label);
+
+		const arrow = document.createElement('span');
+		arrow.className = 'arcadia-dropdown-arrow';
+		setIcon(arrow, 'chevron-down');
+		btnEl.appendChild(arrow);
+
+		btnEl.addEventListener('click', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.openScriptureDropdown(wrapper, ctx);
+		});
+
+		wrapper.appendChild(btnEl);
+		group.querySelector('.arcadia-group-buttons')!.appendChild(wrapper);
+	}
+
+	openScriptureDropdown(wrapper: HTMLElement, ctx: { editor: Editor; view: MarkdownView }) {
+		this.closeDropdowns();
+
+		const dropdown = document.createElement('div');
+		dropdown.className = 'arcadia-dropdown-menu arcadia-scripture-menu';
+
+		// Quick insert with current translation
+		const quickBtn = document.createElement('button');
+		quickBtn.className = 'arcadia-scripture-quick';
+		quickBtn.innerHTML = `<span>Insert Scripture Block (${this.settings.scriptureTranslation})</span>`;
+		quickBtn.addEventListener('click', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.insertScriptureBlock(ctx.editor);
+			this.closeDropdowns();
+		});
+		dropdown.appendChild(quickBtn);
+
+		// Separator
+		dropdown.appendChild(document.createElement('hr'));
+
+		// Translation list
+		const title = document.createElement('div');
+		title.className = 'arcadia-dropdown-title';
+		title.textContent = 'Change Translation';
+		dropdown.appendChild(title);
+
+		for (const [code, name] of Object.entries(BIBLE_TRANSLATIONS)) {
+			const item = document.createElement('button');
+			item.className = `arcadia-scripture-item${code === this.settings.scriptureTranslation ? ' arcadia-scripture-active' : ''}`;
+			item.innerHTML = `<strong>${code}</strong> <span>${name}</span>`;
+			item.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.settings.scriptureTranslation = code;
+				this.saveSettings();
+				this.insertScriptureBlock(ctx.editor);
+				this.closeDropdowns();
+				this.updateToolbar();
+			});
+			dropdown.appendChild(item);
+		}
+
+		wrapper.appendChild(dropdown);
+		this.activeDropdown = dropdown;
+	}
+
+	// ========================================================================
+	// TEXT FORMATTING COMMANDS
+	// ========================================================================
+
+	toggleWrap(editor: Editor, wrapper: string) {
+		const selection = editor.getSelection();
+		if (selection) {
+			if (selection.startsWith(wrapper) && selection.endsWith(wrapper) && selection.length > wrapper.length * 2) {
+				editor.replaceSelection(selection.slice(wrapper.length, -wrapper.length));
+			} else {
+				editor.replaceSelection(`${wrapper}${selection}${wrapper}`);
+			}
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange(`${wrapper}${wrapper}`, cursor);
+			editor.setCursor({ line: cursor.line, ch: cursor.ch + wrapper.length });
+		}
+	}
+
+	toggleHtmlWrap(editor: Editor, tag: string) {
+		const selection = editor.getSelection();
+		const open = `<${tag}>`;
+		const close = `</${tag}>`;
+		if (selection) {
+			if (selection.startsWith(open) && selection.endsWith(close)) {
+				editor.replaceSelection(selection.slice(open.length, -close.length));
+			} else {
+				editor.replaceSelection(`${open}${selection}${close}`);
+			}
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange(`${open}${close}`, cursor);
+			editor.setCursor({ line: cursor.line, ch: cursor.ch + open.length });
+		}
+	}
+
+	clearFormatting(editor: Editor) {
+		const selection = editor.getSelection();
+		if (!selection) return;
+		const cleaned = selection
+			.replace(/\*\*(.+?)\*\*/g, '$1')
+			.replace(/\*(.+?)\*/g, '$1')
+			.replace(/~~(.+?)~~/g, '$1')
+			.replace(/==(.+?)==/g, '$1')
+			.replace(/`(.+?)`/g, '$1')
+			.replace(/<u>(.+?)<\/u>/g, '$1')
+			.replace(/<sub>(.+?)<\/sub>/g, '$1')
+			.replace(/<sup>(.+?)<\/sup>/g, '$1')
+			.replace(/<mark[^>]*>(.+?)<\/mark>/g, '$1')
+			.replace(/<font[^>]*>(.+?)<\/font>/g, '$1')
+			.replace(/<p align="[^"]*">(.+?)<\/p>/g, '$1');
+		editor.replaceSelection(cleaned);
+	}
+
+	// ========================================================================
+	// COLOR COMMANDS
+	// ========================================================================
+
+	applyFontColor(editor: Editor, color: string) {
+		const selection = editor.getSelection();
+		this.settings.lastFontColor = color;
+		this.saveSettings();
+		if (selection) {
+			editor.replaceSelection(`<font color="${color}">${selection}</font>`);
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange(`<font color="${color}"></font>`, cursor);
+			editor.setCursor({ line: cursor.line, ch: cursor.ch + 22 });
+		}
+	}
+
+	applyBackgroundColor(editor: Editor, color: string) {
+		const selection = editor.getSelection();
+		this.settings.lastBackgroundColor = color;
+		this.saveSettings();
+		if (color === 'transparent') {
+			if (selection) {
+				editor.replaceSelection(selection.replace(/<mark[^>]*>([^<]*)<\/mark>/g, '$1'));
+			}
+		} else if (selection) {
+			editor.replaceSelection(`<mark style="background:${color}">${selection}</mark>`);
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange(`<mark style="background:${color}"></mark>`, cursor);
+			editor.setCursor({ line: cursor.line, ch: cursor.ch + 30 + color.length });
+		}
+	}
+
+	// ========================================================================
+	// HEADING COMMANDS
+	// ========================================================================
+
+	insertHeading(editor: Editor, level: number) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		const prefix = '#'.repeat(level) + ' ';
+		const match = line.match(/^(#{1,6})\s/);
+		if (match) {
+			editor.setLine(cursor.line, prefix + line.slice(match[0].length));
+		} else {
+			editor.setLine(cursor.line, prefix + line);
+		}
+	}
+
+	removeHeading(editor: Editor) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		const match = line.match(/^#{1,6}\s/);
+		if (match) {
+			editor.setLine(cursor.line, line.slice(match[0].length));
+		}
+	}
+
+	// ========================================================================
+	// LIST / PARAGRAPH COMMANDS
+	// ========================================================================
+
+	toggleBulletList(editor: Editor) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		if (line.match(/^(\s*)- /)) {
+			editor.setLine(cursor.line, line.replace(/^(\s*)- /, '$1'));
+		} else if (line.match(/^(\s*)\d+\. /)) {
+			editor.setLine(cursor.line, line.replace(/^(\s*)\d+\. /, '$1- '));
+		} else if (line.match(/^(\s*)- \[[ x]\] /)) {
+			editor.setLine(cursor.line, line.replace(/^(\s*)- \[[ x]\] /, '$1- '));
+		} else {
+			const indent = line.match(/^(\s*)/)?.[0] || '';
+			editor.setLine(cursor.line, indent + '- ' + line.trimStart());
+		}
+	}
+
+	toggleNumberedList(editor: Editor) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		if (line.match(/^(\s*)\d+\. /)) {
+			editor.setLine(cursor.line, line.replace(/^(\s*)\d+\. /, '$1'));
+		} else if (line.match(/^(\s*)- /)) {
+			editor.setLine(cursor.line, line.replace(/^(\s*)- /, '$11. '));
+		} else {
+			const indent = line.match(/^(\s*)/)?.[0] || '';
+			editor.setLine(cursor.line, indent + '1. ' + line.trimStart());
+		}
+	}
+
+	toggleChecklist(editor: Editor) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		if (line.match(/^(\s*)- \[ \] /)) {
+			editor.setLine(cursor.line, line.replace(/^(\s*)- \[ \] /, '$1- [x] '));
+		} else if (line.match(/^(\s*)- \[x\] /i)) {
+			editor.setLine(cursor.line, line.replace(/^(\s*)- \[x\] /i, '$1'));
+		} else if (line.match(/^(\s*)- /)) {
+			editor.setLine(cursor.line, line.replace(/^(\s*)- /, '$1- [ ] '));
+		} else {
+			const indent = line.match(/^(\s*)/)?.[0] || '';
+			editor.setLine(cursor.line, indent + '- [ ] ' + line.trimStart());
+		}
+	}
+
+	toggleBlockquote(editor: Editor) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		if (line.startsWith('> ')) {
+			editor.setLine(cursor.line, line.slice(2));
+		} else {
+			editor.setLine(cursor.line, '> ' + line);
+		}
+	}
+
+	indent(editor: Editor) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		editor.setLine(cursor.line, '\t' + line);
+		editor.setCursor({ line: cursor.line, ch: cursor.ch + 1 });
+	}
+
+	outdent(editor: Editor) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		if (line.startsWith('\t')) {
+			editor.setLine(cursor.line, line.slice(1));
+			editor.setCursor({ line: cursor.line, ch: Math.max(0, cursor.ch - 1) });
+		} else if (line.startsWith('    ')) {
+			editor.setLine(cursor.line, line.slice(4));
+			editor.setCursor({ line: cursor.line, ch: Math.max(0, cursor.ch - 4) });
+		}
+	}
+
+	setAlignment(editor: Editor, alignment: string) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		const match = line.match(/^<p align="[^"]*">(.*)<\/p>$/);
+		if (match) {
+			editor.setLine(cursor.line, `<p align="${alignment}">${match[1]}</p>`);
+		} else {
+			editor.setLine(cursor.line, `<p align="${alignment}">${line}</p>`);
+		}
+	}
+
+	// ========================================================================
+	// INSERT COMMANDS
+	// ========================================================================
+
+	insertLink(editor: Editor) {
+		const selection = editor.getSelection();
+		if (selection) {
+			editor.replaceSelection(`[${selection}](url)`);
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange('[](url)', cursor);
+			editor.setCursor({ line: cursor.line, ch: cursor.ch + 1 });
+		}
+	}
+
+	insertInternalLink(editor: Editor) {
+		const selection = editor.getSelection();
+		if (selection) {
+			editor.replaceSelection(`[[${selection}]]`);
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange('[[]]', cursor);
+			editor.setCursor({ line: cursor.line, ch: cursor.ch + 2 });
+		}
+	}
+
+	insertImage(editor: Editor) {
+		const selection = editor.getSelection();
+		if (selection) {
+			editor.replaceSelection(`![${selection}](image-url)`);
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange('![alt text](image-url)', cursor);
+			editor.setSelection(
+				{ line: cursor.line, ch: cursor.ch + 2 },
+				{ line: cursor.line, ch: cursor.ch + 10 }
+			);
+		}
+	}
+
+	insertTable(editor: Editor) {
+		const cursor = editor.getCursor();
+		const table = '\n| Header 1 | Header 2 | Header 3 |\n| -------- | -------- | -------- |\n| Cell 1   | Cell 2   | Cell 3   |\n| Cell 4   | Cell 5   | Cell 6   |\n';
+		editor.replaceRange(table, cursor);
+		editor.setCursor({ line: cursor.line + 1, ch: 2 });
+	}
+
+	insertCodeBlock(editor: Editor) {
+		const selection = editor.getSelection();
+		const cursor = editor.getCursor();
+		if (selection) {
+			editor.replaceSelection(`\`\`\`\n${selection}\n\`\`\``);
+		} else {
+			editor.replaceRange('```\n\n```', cursor);
+			editor.setCursor({ line: cursor.line + 1, ch: 0 });
+		}
+	}
+
+	insertHorizontalRule(editor: Editor) {
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		if (line.trim() === '') {
+			editor.setLine(cursor.line, '---');
+		} else {
+			editor.replaceRange('\n\n---\n\n', { line: cursor.line, ch: line.length });
+			editor.setCursor({ line: cursor.line + 4, ch: 0 });
+		}
+	}
+
+	insertCallout(editor: Editor) {
+		const cursor = editor.getCursor();
+		editor.replaceRange('> [!note] Title\n> Content goes here...\n', cursor);
+		editor.setCursor({ line: cursor.line, ch: 10 });
+	}
+
+	insertFootnote(editor: Editor) {
+		const text = editor.getValue();
+		const footnotePattern = /\[\^(\d+)\]/g;
+		let maxNum = 0;
+		let match;
+		while ((match = footnotePattern.exec(text)) !== null) {
+			maxNum = Math.max(maxNum, parseInt(match[1]));
+		}
+		const num = maxNum + 1;
+		const cursor = editor.getCursor();
+		editor.replaceRange(`[^${num}]`, cursor);
+		// Add footnote definition at end of document
+		const lastLine = editor.lastLine();
+		const lastLineText = editor.getLine(lastLine);
+		const suffix = lastLineText.trim() === '' ? '' : '\n';
+		editor.replaceRange(`${suffix}\n[^${num}]: `, { line: lastLine, ch: lastLineText.length });
+	}
+
+	insertDate(editor: Editor) {
+		const now = new Date();
+		const date = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+		editor.replaceRange(date, editor.getCursor());
+	}
+
+	insertDateTime(editor: Editor) {
+		const now = new Date();
+		const date = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+		const time = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+		editor.replaceRange(`${date} ${time}`, editor.getCursor());
+	}
+
+	// ========================================================================
+	// THEOLOGY COMMANDS
+	// ========================================================================
+
+	insertScriptureBlock(editor: Editor) {
+		const cursor = editor.getCursor();
+		const t = this.settings.scriptureTranslation;
+		editor.replaceRange(
+			`> [!scripture] Scripture Reference\n> **Book Chapter:Verse (${t})**\n>\n> Enter scripture text here...\n`,
+			cursor
+		);
+		editor.setCursor({ line: cursor.line + 1, ch: 3 });
+	}
+
+	insertCrossReference(editor: Editor) {
+		const selection = editor.getSelection();
+		if (selection) {
+			editor.replaceSelection(`<span class="cross-ref" title="Cross Reference">${selection}</span>`);
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange('<span class="cross-ref" title="Cross Reference">ref</span>', cursor);
+		}
+	}
+
+	insertVerseHighlight(editor: Editor) {
+		const selection = editor.getSelection();
+		if (selection) {
+			editor.replaceSelection(`<span class="verse-highlight">${selection}</span>`);
+		} else {
+			const cursor = editor.getCursor();
+			editor.replaceRange('<span class="verse-highlight"></span>', cursor);
+			editor.setCursor({ line: cursor.line, ch: cursor.ch + 33 });
+		}
+	}
+
+	insertCommentaryNote(editor: Editor) {
+		const cursor = editor.getCursor();
+		editor.replaceRange(
+			`> [!note] Commentary\n> **Source:** \n> **Page/Section:** \n>\n> Commentary text...\n`,
+			cursor
+		);
+		editor.setCursor({ line: cursor.line + 1, ch: 14 });
+	}
+
+	insertLanguageNote(editor: Editor) {
+		const cursor = editor.getCursor();
+		editor.replaceRange(
+			`> [!info] Original Language\n> **Word:** \n> **Transliteration:** \n> **Strong\'s:** \n> **Meaning:** \n`,
+			cursor
+		);
+		editor.setCursor({ line: cursor.line + 1, ch: 11 });
+	}
+
+	// ========================================================================
+	// COMMAND REGISTRATION
+	// ========================================================================
+
+	registerCommands() {
+		// Undo/Redo
+		this.addCommand({ id: 'undo', name: 'Undo', editorCallback: (e) => (e as any).undo() });
+		this.addCommand({ id: 'redo', name: 'Redo', editorCallback: (e) => (e as any).redo() });
+
+		// Text formatting
+		this.addCommand({ id: 'toggle-bold', name: 'Toggle Bold', editorCallback: (e) => this.toggleWrap(e, '**') });
+		this.addCommand({ id: 'toggle-italic', name: 'Toggle Italic', editorCallback: (e) => this.toggleWrap(e, '*') });
+		this.addCommand({ id: 'toggle-underline', name: 'Toggle Underline', editorCallback: (e) => this.toggleHtmlWrap(e, 'u') });
+		this.addCommand({ id: 'toggle-strikethrough', name: 'Toggle Strikethrough', editorCallback: (e) => this.toggleWrap(e, '~~') });
+		this.addCommand({ id: 'toggle-highlight', name: 'Toggle Highlight', editorCallback: (e) => this.toggleWrap(e, '==') });
+		this.addCommand({ id: 'toggle-subscript', name: 'Toggle Subscript', editorCallback: (e) => this.toggleHtmlWrap(e, 'sub') });
+		this.addCommand({ id: 'toggle-superscript', name: 'Toggle Superscript', editorCallback: (e) => this.toggleHtmlWrap(e, 'sup') });
+		this.addCommand({ id: 'clear-formatting', name: 'Clear Formatting', editorCallback: (e) => this.clearFormatting(e) });
+
+		// Headings
+		for (let i = 1; i <= 6; i++) {
+			this.addCommand({ id: `heading-${i}`, name: `Heading ${i}`, editorCallback: (e) => this.insertHeading(e, i) });
+		}
+
+		// Lists
+		this.addCommand({ id: 'bullet-list', name: 'Toggle Bullet List', editorCallback: (e) => this.toggleBulletList(e) });
+		this.addCommand({ id: 'numbered-list', name: 'Toggle Numbered List', editorCallback: (e) => this.toggleNumberedList(e) });
+		this.addCommand({ id: 'checklist', name: 'Toggle Checklist', editorCallback: (e) => this.toggleChecklist(e) });
+		this.addCommand({ id: 'blockquote', name: 'Toggle Blockquote', editorCallback: (e) => this.toggleBlockquote(e) });
+
+		// Alignment
+		this.addCommand({ id: 'align-left', name: 'Align Left', editorCallback: (e) => this.setAlignment(e, 'left') });
+		this.addCommand({ id: 'align-center', name: 'Align Center', editorCallback: (e) => this.setAlignment(e, 'center') });
+		this.addCommand({ id: 'align-right', name: 'Align Right', editorCallback: (e) => this.setAlignment(e, 'right') });
+		this.addCommand({ id: 'align-justify', name: 'Align Justify', editorCallback: (e) => this.setAlignment(e, 'justify') });
+
+		// Insert
+		this.addCommand({ id: 'insert-link', name: 'Insert Link', editorCallback: (e) => this.insertLink(e) });
+		this.addCommand({ id: 'insert-image', name: 'Insert Image', editorCallback: (e) => this.insertImage(e) });
+		this.addCommand({ id: 'insert-table', name: 'Insert Table', editorCallback: (e) => this.insertTable(e) });
+		this.addCommand({ id: 'insert-code-block', name: 'Insert Code Block', editorCallback: (e) => this.insertCodeBlock(e) });
+		this.addCommand({ id: 'insert-horizontal-rule', name: 'Insert Horizontal Rule', editorCallback: (e) => this.insertHorizontalRule(e) });
+		this.addCommand({ id: 'insert-callout', name: 'Insert Callout', editorCallback: (e) => this.insertCallout(e) });
+		this.addCommand({ id: 'insert-footnote', name: 'Insert Footnote', editorCallback: (e) => this.insertFootnote(e) });
+		this.addCommand({ id: 'insert-scripture', name: 'Insert Scripture Block', editorCallback: (e) => this.insertScriptureBlock(e) });
+
+		// TOC
+		this.addCommand({ id: 'toggle-toc', name: 'Toggle Table of Contents', callback: () => this.toggleTOC() });
+	}
+}
+
+// ============================================================================
+// SETTINGS TAB
+// ============================================================================
+
+class ArcadiaToolbarSettingTab extends PluginSettingTab {
+	plugin: ArcadiaToolbarPlugin;
+
+	constructor(app: App, plugin: ArcadiaToolbarPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		containerEl.createEl('h2', { text: 'Arcadia Toolbar Settings' });
+
+		// Tab Visibility
+		containerEl.createEl('h3', { text: 'Ribbon Tabs' });
+
+		new Setting(containerEl)
+			.setName('Show Home tab')
+			.setDesc('Text formatting, colors, headings, lists, alignment')
+			.addToggle(t => t.setValue(this.plugin.settings.showHomeTab)
+				.onChange(async v => { this.plugin.settings.showHomeTab = v; await this.plugin.saveSettings(); this.plugin.updateToolbar(); }));
+
+		new Setting(containerEl)
+			.setName('Show Insert tab')
+			.setDesc('Links, images, tables, code, callouts, footnotes')
+			.addToggle(t => t.setValue(this.plugin.settings.showInsertTab)
+				.onChange(async v => { this.plugin.settings.showInsertTab = v; await this.plugin.saveSettings(); this.plugin.updateToolbar(); }));
+
+		new Setting(containerEl)
+			.setName('Show Theology tab')
+			.setDesc('Scripture blocks, cross-references, original language notes')
+			.addToggle(t => t.setValue(this.plugin.settings.showTheologyTab)
+				.onChange(async v => { this.plugin.settings.showTheologyTab = v; await this.plugin.saveSettings(); this.plugin.updateToolbar(); }));
+
+		new Setting(containerEl)
+			.setName('Show View tab')
+			.setDesc('Table of Contents, word count, display options')
+			.addToggle(t => t.setValue(this.plugin.settings.showViewTab)
+				.onChange(async v => { this.plugin.settings.showViewTab = v; await this.plugin.saveSettings(); this.plugin.updateToolbar(); }));
+
+		// TOC Settings
+		containerEl.createEl('h3', { text: 'Table of Contents' });
+
+		new Setting(containerEl)
+			.setName('Pin TOC on startup')
+			.setDesc('Automatically open the TOC panel when Obsidian starts')
+			.addToggle(t => t.setValue(this.plugin.settings.tocShowOnStartup)
+				.onChange(async v => {
+					this.plugin.settings.tocShowOnStartup = v;
+					this.plugin.settings.tocPinned = v;
+					await this.plugin.saveSettings();
+				}));
+
+		// Scripture Settings
+		containerEl.createEl('h3', { text: 'Scripture' });
+
+		new Setting(containerEl)
+			.setName('Default translation')
+			.setDesc('Default Bible translation for scripture blocks')
+			.addDropdown(d => {
+				for (const [code, name] of Object.entries(BIBLE_TRANSLATIONS)) {
+					d.addOption(code, `${code} — ${name}`);
+				}
+				d.setValue(this.plugin.settings.scriptureTranslation)
+					.onChange(async v => {
+						this.plugin.settings.scriptureTranslation = v;
+						await this.plugin.saveSettings();
+						this.plugin.updateToolbar();
+					});
+			});
+	}
+}
